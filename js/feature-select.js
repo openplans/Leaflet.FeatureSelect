@@ -23,7 +23,7 @@ L.FeatureSelect = L.Class.extend({
     this._map = map;
     this._center = map.getCenter();
 
-    this._intersectingLayers = {};
+    this.layers = {};
 
     this._marker = L.marker(this._center, {
       icon: this.options.icon,
@@ -39,17 +39,32 @@ L.FeatureSelect = L.Class.extend({
     return this;
   },
 
-  _checkIntersections: function() {
-    var selectionChanged = false,
-        justSelected = [],
-        justUnselected  = [],
-        centerPoint = this._map.project(this._center);
+  _handleIntersection: function(layer) {
+    if (!this.layers[L.stamp(layer)]) {
+      this.layers[L.stamp(layer)] = layer;
 
-    this.layers = [];
+      this.justSelected.push(layer);
+    }
+  },
+
+  _handleNoIntersection: function(layer) {
+    if (this.layers[L.stamp(layer)]) {
+      delete this.layers[L.stamp(layer)];
+      this.justUnselected.push(layer);
+    }
+  },
+
+  _checkIntersections: function() {
+    var centerPoint = this._map.project(this._center),
+        selectBounds, selectBoundsLatLngs;
+
+    this.justSelected = [];
+    this.justUnselected  = [];
+
     this._center = this._map.getCenter();
     this._marker.setLatLng(this._center);
 
-    this._selectBounds = L.latLngBounds(
+    selectBounds = L.latLngBounds(
       this._map.unproject([
         centerPoint.x + this.options.selectSize.x/2,
         centerPoint.y - this.options.selectSize.y/2
@@ -60,99 +75,87 @@ L.FeatureSelect = L.Class.extend({
       ])
     );
 
-    // TODO: this is not very robust. It has only been tested with multiline strings
-    // via GeoJSON layers and will not work for other geometry types. FIX ME!
-    this.options.featureGroup.eachLayer(function(layer) {
-      var latLngs;
+    selectBoundsLatLngs = [selectBounds.getSouthWest(), selectBounds.getSouthEast(), selectBounds.getNorthEast(),
+                           selectBounds.getNorthWest(), selectBounds.getSouthWest()];
 
-      if (layer.feature) {
-        latLngs = L.GeoJSON.coordsToLatLngs(layer.feature.geometry.coordinates, 1)[0];
-      } else if (layer.getLatLngs) {
+    this.options.featureGroup.eachLayer(function(layer) {
+      var latLngs, len, i;
+
+      if (layer.getLatLngs) {
         latLngs = layer.getLatLngs();
       }
 
-      if (latLngs) {
-        if (this._lineStringsIntersect(L.rectangle(this._selectBounds).getLatLngs(), latLngs)) {
-          this.layers.push(layer);
-
-          if (!this._intersectingLayers[L.stamp(layer)]) {
-            selectionChanged = true;
-            this._intersectingLayers[L.stamp(layer)] = layer;
-
-            justSelected.push(layer);
+      switch (layer.feature.geometry.type) {
+        case 'Point':
+          latLngs = [ layer.getLatLng() ];
+        case 'MultiPoint':
+          for (i=0; i<latLngs.length; i++) {
+            if (selectBounds.contains(latLngs[i]))  {
+              this._handleIntersection(layer);
+            } else {
+              this._handleNoIntersection(layer);
+            }
           }
-        } else {
-          if (this._intersectingLayers[L.stamp(layer)]) {
-            selectionChanged = true;
-            delete this._intersectingLayers[L.stamp(layer)];
+          break;
 
-            justUnselected.push(layer);
+        case 'LineString':
+          latLngs = [ latLngs ];
+        case 'MultiLineString':
+          for (i=0; i<latLngs.length; i++) {
+            if (selectBounds.intersects(layer.getBounds()) && this._lineStringsIntersect(selectBoundsLatLngs, latLngs[i])) {
+              console.log(layer.feature.geometry.type, 'intersects');
+              this._handleIntersection(layer);
+            } else {
+              console.log(layer.feature.geometry.type, 'nointersects');
+              this._handleNoIntersection(layer);
+            }
+
           }
-        }
+          break;
+
       }
     }, this);
 
-    if (selectionChanged) {
-      selectionChanged = false;
-
-      if (justSelected.length) {
-        this.fire('select', {
-          layers: justSelected
-        });
-      }
-
-      if (justUnselected.length) {
-        this.fire('unselect', {
-          layers: justUnselected
-        });
-      }
+    if (this.justSelected.length) {
+      this.fire('select', {
+        layers: this.justSelected
+      });
     }
 
-
+    if (this.justUnselected.length) {
+      this.fire('unselect', {
+        layers: this.justUnselected
+      });
+    }
   },
 
   // adapted from https://github.com/maxogden/geojson-js-utils/
   _lineStringsIntersect: function (l1, l2) {
-    var intersects = [],
-        i, j, iLen, jLen, ua, ub;
+    var i, j, iLen, jLen, ua, ub;
 
     for (i = 0, iLen = l1.length - 2; i <= iLen; ++i) {
       for (j = 0, jLen = l2.length - 2; j <= jLen; ++j) {
-        var a1 = {
-            x: l1[i].lng,
-            y: l1[i].lat
-          },
-          a2 = {
-            x: l1[i + 1].lng,
-            y: l1[i + 1].lat
-          },
-          b1 = {
-            x: l2[j].lng,
-            y: l2[j].lat
-          },
-          b2 = {
-            x: l2[j + 1].lng,
-            y: l2[j + 1].lat
-          },
-          ua_t = (b2.x - b1.x) * (a1.y - b1.y) - (b2.y - b1.y) * (a1.x - b1.x),
-          ub_t = (a2.x - a1.x) * (a1.y - b1.y) - (a2.y - a1.y) * (a1.x - b1.x),
-          u_b = (b2.y - b1.y) * (a2.x - a1.x) - (b2.x - b1.x) * (a2.y - a1.y);
+        var a1 = {x: l1[i].lng, y: l1[i].lat },
+            a2 = {x: l1[i + 1].lng, y: l1[i + 1].lat },
+            b1 = {x: l2[j].lng, y: l2[j].lat },
+            b2 = {x: l2[j + 1].lng, y: l2[j + 1].lat },
+
+            ua_t = (b2.x - b1.x) * (a1.y - b1.y) - (b2.y - b1.y) * (a1.x - b1.x),
+            ub_t = (a2.x - a1.x) * (a1.y - b1.y) - (a2.y - a1.y) * (a1.x - b1.x),
+            u_b = (b2.y - b1.y) * (a2.x - a1.x) - (b2.x - b1.x) * (a2.y - a1.y);
 
         if (u_b !== 0) {
           ua = ua_t / u_b;
           ub = ub_t / u_b;
 
           if (0 <= ua && ua <= 1 && 0 <= ub && ub <= 1) {
-            intersects.push(L.latLng([a1.y + ua * (a2.y - a1.y), a1.x + ua * (a2.x - a1.x)]));
+            return true;
           }
         }
       }
     }
 
-    if (intersects.length === 0) {
-      intersects = false;
-    }
-    return intersects;
+    return false;
   }
 });
 
