@@ -56,7 +56,7 @@ L.FeatureSelect = L.Class.extend({
 
   _checkIntersections: function() {
     var centerPoint = this._map.project(this._center),
-        selectBounds, selectBoundsLatLngs;
+        selectBounds, selectBoundsCoords;
 
     this.justSelected = [];
     this.justUnselected  = [];
@@ -75,46 +75,56 @@ L.FeatureSelect = L.Class.extend({
       ])
     );
 
-    selectBoundsLatLngs = [selectBounds.getSouthWest(), selectBounds.getSouthEast(), selectBounds.getNorthEast(),
-                           selectBounds.getNorthWest(), selectBounds.getSouthWest()];
+    selectBoundsCoords = L.rectangle(selectBounds).toGeoJSON().geometry.coordinates[0];
 
     this.options.featureGroup.eachLayer(function(layer) {
-      var latLngs, len, i;
-
-      if (layer.getLatLngs) {
-        latLngs = layer.getLatLngs();
-      }
+      var coords = layer.feature.geometry.coordinates,
+          len, i, intersects = false;
 
       switch (layer.feature.geometry.type) {
         case 'Point':
-          latLngs = [ layer.getLatLng() ];
+          coords = [ coords ];
+          // fall through
         case 'MultiPoint':
-          for (i=0; i<latLngs.length; i++) {
-            if (selectBounds.contains(latLngs[i]))  {
-              this._handleIntersection(layer);
-            } else {
-              this._handleNoIntersection(layer);
+          for (i=0; i<coords.length; i++) {
+            if (selectBounds.contains(L.latLng([coords[i][1], coords[i][0]])))  {
+              intersects = true;
             }
           }
           break;
 
         case 'LineString':
-          latLngs = [ latLngs ];
+          coords = [ coords ];
+          // fall through
         case 'MultiLineString':
-          for (i=0; i<latLngs.length; i++) {
-            if (selectBounds.intersects(layer.getBounds()) && this._lineStringsIntersect(selectBoundsLatLngs, latLngs[i])) {
-              console.log(layer.feature.geometry.type, 'intersects');
-              this._handleIntersection(layer);
-            } else {
-              console.log(layer.feature.geometry.type, 'nointersects');
-              this._handleNoIntersection(layer);
+          for (i=0; i<coords.length; i++) {
+            if (selectBounds.intersects(layer.getBounds()) && this._lineStringsIntersect(selectBoundsCoords, coords[i])) {
+              intersects = true;
             }
+          }
+          break;
 
+        case 'Polygon':
+          coords = [ coords ];
+          // fall through
+        case 'MultiPolygon':
+          for (i=0; i<coords.length; i++) {
+            if (selectBounds.intersects(layer.getBounds()) && this._pointInPolygon(this._center.lng, this._center.lat, coords[i][0])) {
+              intersects = true;
+            }
           }
           break;
 
       }
+
+      if (intersects) {
+        this._handleIntersection(layer);
+      } else {
+        this._handleNoIntersection(layer);
+      }
+
     }, this);
+
 
     if (this.justSelected.length) {
       this.fire('select', {
@@ -130,24 +140,21 @@ L.FeatureSelect = L.Class.extend({
   },
 
   // adapted from https://github.com/maxogden/geojson-js-utils/
-  _lineStringsIntersect: function (l1, l2) {
-    var i, j, iLen, jLen, ua, ub;
+  _lineStringsIntersect: function (c1, c2) {
+    for (var i = 0; i <= c1.length - 2; ++i) {
+      for (var j = 0; j <= c2.length - 2; ++j) {
+        var a1 = {x: c1[i][1], y: c1[i][0] },
+          a2 = {x: c1[i + 1][1], y: c1[i + 1][0] },
+          b1 = {x: c2[j][1], y: c2[j][0] },
+          b2 = {x: c2[j + 1][1], y: c2[j + 1][0] },
 
-    for (i = 0, iLen = l1.length - 2; i <= iLen; ++i) {
-      for (j = 0, jLen = l2.length - 2; j <= jLen; ++j) {
-        var a1 = {x: l1[i].lng, y: l1[i].lat },
-            a2 = {x: l1[i + 1].lng, y: l1[i + 1].lat },
-            b1 = {x: l2[j].lng, y: l2[j].lat },
-            b2 = {x: l2[j + 1].lng, y: l2[j + 1].lat },
-
-            ua_t = (b2.x - b1.x) * (a1.y - b1.y) - (b2.y - b1.y) * (a1.x - b1.x),
-            ub_t = (a2.x - a1.x) * (a1.y - b1.y) - (a2.y - a1.y) * (a1.x - b1.x),
-            u_b = (b2.y - b1.y) * (a2.x - a1.x) - (b2.x - b1.x) * (a2.y - a1.y);
+          ua_t = (b2.x - b1.x) * (a1.y - b1.y) - (b2.y - b1.y) * (a1.x - b1.x),
+          ub_t = (a2.x - a1.x) * (a1.y - b1.y) - (a2.y - a1.y) * (a1.x - b1.x),
+          u_b = (b2.y - b1.y) * (a2.x - a1.x) - (b2.x - b1.x) * (a2.y - a1.y);
 
         if (u_b !== 0) {
-          ua = ua_t / u_b;
-          ub = ub_t / u_b;
-
+          var ua = ua_t / u_b,
+            ub = ub_t / u_b;
           if (0 <= ua && ua <= 1 && 0 <= ub && ub <= 1) {
             return true;
           }
@@ -156,6 +163,25 @@ L.FeatureSelect = L.Class.extend({
     }
 
     return false;
+  },
+
+  // Adapted from http://www.ecse.rpi.edu/Homepages/wrf/Research/Short_Notes/pnpoly.html#Listing the Vertices
+  _pointInPolygon: function(x, y, polyCoords) {
+    var inside = false,
+        intersects, i, j;
+
+    for (i = 0, j = polyCoords.length - 1; i < polyCoords.length; j = i++) {
+      var xi = polyCoords[i][0], yi = polyCoords[i][1];
+      var xj = polyCoords[j][0], yj = polyCoords[j][1];
+
+      intersects = ((yi > y) !== (yj > y)) &&
+                       (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (intersects) {
+        inside = !inside;
+      }
+    }
+
+    return inside;
   }
 });
 
