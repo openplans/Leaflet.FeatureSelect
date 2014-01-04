@@ -33,8 +33,13 @@ L.FeatureSelect = L.Class.extend({
 
     map.on('move', this._checkIntersections, this);
 
-    this.options.featureGroup.on('layeradd', this._checkIntersections, this);
-    this.options.featureGroup.on('layerremove', this._checkIntersections, this);
+    this.options.featureGroup.on('layeradd', function(evt) {
+      this._checkIntersections();
+    }, this);
+    this.options.featureGroup.on('layerremove', function(evt) {
+      this._handleNoIntersection(evt.layer);
+      this._checkIntersections();
+    }, this);
 
     return this;
   },
